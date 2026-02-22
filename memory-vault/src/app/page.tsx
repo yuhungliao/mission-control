@@ -65,7 +65,7 @@ export default function Home() {
   const handleSync = useCallback(async () => {
     setSyncing(true);
     try {
-      const res = await fetch("/api/sync");
+      const res = await fetch("/api/sync?token=mc-sync-2026");
       const data = await res.json();
       if (data.files) {
         for (const file of data.files) {

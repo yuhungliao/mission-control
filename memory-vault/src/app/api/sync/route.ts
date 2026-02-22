@@ -1,8 +1,27 @@
-import { NextResponse } from "next/server";
+import { NextResponse, NextRequest } from "next/server";
 import fs from "fs";
 import path from "path";
 
 const WORKSPACE = process.env.WORKSPACE_PATH || "/Users/kevinliao/.openclaw/workspace";
+const SYNC_TOKEN = process.env.SYNC_API_TOKEN || "mc-sync-2026";
+
+// Patterns to redact from content before serving
+const SENSITIVE_PATTERNS = [
+  /(?:api[_-]?key|token|secret|password|credential)\s*[:=]\s*["']?[\w\-\.]{16,}["']?/gi,
+  /sk-proj-[\w\-]+/g,
+  /ghp_[\w]+/g,
+  /BSA[\w]+/g,
+  /eyJ[\w\-\.=]+/g, // JWT tokens
+  /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g, // IP addresses
+];
+
+function redactSensitive(content: string): string {
+  let redacted = content;
+  for (const pattern of SENSITIVE_PATTERNS) {
+    redacted = redacted.replace(pattern, "[REDACTED]");
+  }
+  return redacted;
+}
 
 interface MemoryFile {
   slug: string;
@@ -16,7 +35,6 @@ interface MemoryFile {
 
 function extractTags(content: string): string[] {
   const tags = new Set<string>();
-  // Extract headers as tags
   const headers = content.match(/^##\s+(.+)$/gm);
   if (headers) {
     for (const h of headers.slice(0, 5)) {
@@ -33,18 +51,32 @@ function getCategory(filename: string): "core" | "daily" | "reference" {
 }
 
 function getTitle(filename: string, content: string): string {
-  // Try first H1
   const h1 = content.match(/^#\s+(.+)$/m);
   if (h1) return h1[1].replace(/[*_`]/g, "").trim();
-  // Fallback to filename
   return filename.replace(/\.md$/, "");
 }
 
-export async function GET() {
+function sanitizeSourceFile(filePath: string): string {
+  // Strip absolute path prefix, only show relative path
+  return filePath.replace(WORKSPACE + "/", "").replace(WORKSPACE, "");
+}
+
+export async function GET(request: NextRequest) {
+  // Auth check — require Bearer token or query param
+  const authHeader = request.headers.get("authorization");
+  const urlToken = request.nextUrl.searchParams.get("token");
+  const providedToken = authHeader?.replace("Bearer ", "") || urlToken;
+
+  if (providedToken !== SYNC_TOKEN) {
+    return NextResponse.json(
+      { error: "Unauthorized. Provide valid token via Authorization header or ?token= param." },
+      { status: 401 }
+    );
+  }
+
   try {
     const files: MemoryFile[] = [];
 
-    // Top-level .md files
     const topFiles = fs.readdirSync(WORKSPACE).filter((f) => f.endsWith(".md"));
     for (const f of topFiles) {
       const filePath = path.join(WORKSPACE, f);
@@ -52,15 +84,14 @@ export async function GET() {
       files.push({
         slug: f.replace(/\.md$/, ""),
         title: getTitle(f, content),
-        content,
+        content: redactSensitive(content),
         category: getCategory(f),
         wordCount: content.split(/\s+/).filter(Boolean).length,
         tags: extractTags(content),
-        sourceFile: filePath,
+        sourceFile: sanitizeSourceFile(filePath),
       });
     }
 
-    // memory/ directory
     const memDir = path.join(WORKSPACE, "memory");
     if (fs.existsSync(memDir)) {
       const memFiles = fs.readdirSync(memDir).filter((f) => f.endsWith(".md"));
@@ -70,17 +101,17 @@ export async function GET() {
         files.push({
           slug: `memory/${f.replace(/\.md$/, "")}`,
           title: getTitle(f, content),
-          content,
+          content: redactSensitive(content),
           category: getCategory(f),
           wordCount: content.split(/\s+/).filter(Boolean).length,
           tags: extractTags(content),
-          sourceFile: filePath,
+          sourceFile: sanitizeSourceFile(filePath),
         });
       }
     }
 
     return NextResponse.json({ files, count: files.length });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
